@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+processed_events.json
+processed_events.json.lock
+processed_events.json.tmp
