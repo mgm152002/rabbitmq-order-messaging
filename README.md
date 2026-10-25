@@ -102,7 +102,7 @@ pika 1.4.4. Full, unedited terminal output for each demo is in `evidence/`.
 
 All 5 messages were processed and ACKed, 5 unique `event_id`s recorded.
 
-![Successful message processing](screenshots/01-successful-processing.png)
+<img width="1185" height="612" alt="01-successful-processing" src="https://github.com/user-attachments/assets/d8941bf8-2bc2-4a12-bd96-bae63f4c2751" />
 
 ## Evidence: two competing consumers
 
@@ -126,7 +126,7 @@ pattern: RabbitMQ delivers each message to one consumer only, and
 `prefetch_count=1` keeps the split roughly even instead of letting the
 first worker drain the queue.
 
-![Two competing consumers](screenshots/02-competing-consumers.png)
+<img width="1185" height="678" alt="02-competing-consumers" src="https://github.com/user-attachments/assets/1d4bf2ad-2514-46ca-9a07-0c5ccf67c5d1" />
 
 ## Evidence: failure and redelivery
 
@@ -161,7 +161,7 @@ sequence. Worker-2 reclaims worker-1's dead claim, processes, and ACKs.
 Worker-2 kept running throughout, so the system as a whole never went
 down, and the order was not lost.
 
-![Failure and redelivery](screenshots/03-failure-redelivery.png)
+<img width="1219" height="326" alt="03-failure-redelivery" src="https://github.com/user-attachments/assets/55f7425d-3cf9-47f2-8bc6-3ad191279e26" />
 
 ## Evidence: duplicate handling
 
