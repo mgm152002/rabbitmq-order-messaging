@@ -204,7 +204,8 @@ exactly once: the store ends with exactly one processed entry,
 of finished work, so RabbitMQ does not redeliver it forever -- and, as
 the next section shows, not before that either.
 
-![Duplicate handling](screenshots/04-duplicate-handling.png)
+<img width="1496" height="392" alt="04-duplicate-handling (1)" src="https://github.com/user-attachments/assets/4c5e78d4-221f-43ed-a2e3-603f3129ec97" />
+
 
 ## Evidence: loss protection when the first worker crashes mid-processing
 
@@ -246,7 +247,8 @@ of finished work. If the first worker had instead stayed alive past
 the 30-second wait, the waiting worker would NACK with requeue=True --
 again preserving, never discarding, the copy.
 
-![Loss protection](screenshots/05-loss-protection.png)
+<img width="2145" height="436" alt="05-loss-protection" src="https://github.com/user-attachments/assets/18520b2e-a645-45c8-be3d-fb37c43b4ba0" />
+
 
 ## Files
 
