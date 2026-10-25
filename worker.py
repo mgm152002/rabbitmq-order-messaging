@@ -29,13 +29,22 @@ Processed ``event_id`` values are recorded in a shared JSON file
 
 The check and the claim are ONE atomic step: under an exclusive file
 lock, the worker re-reads the store and either claims the event (status
-``processing``) or finds it already claimed/processed and drops it as a
-duplicate. Two simultaneous copies therefore cannot both run the
-business action -- the second sees the first's live claim and ACKs
-without processing. A claim is not a trap for crash redelivery: if the
-claiming worker's PID is dead, the redelivered copy reclaims the event
-and processes it normally. Only a live claim or a ``processed`` record
-counts as a duplicate.
+``processing``) or finds it already claimed/processed. Two simultaneous
+copies therefore cannot both run the business action.
+
+Crucially, a copy that arrives while another worker is still processing
+is NOT ACKed straight away. ACKing it would discard the only backup
+copy: if the first worker then crashed before finishing, that copy
+would be gone too, and the business action could be lost. Instead the
+second worker holds its copy unacknowledged and polls the claim: if the
+first worker finishes, the copy is ACKed as a duplicate; if the first
+worker's PID dies, the waiting worker reclaims the event and processes
+it itself. Only after 30 seconds of no resolution does it NACK with
+requeue=True, which also preserves the message. A ``processed`` record
+is the only case ACKed immediately, because the work is already done.
+A claim is not a trap for crash redelivery: if the claiming worker's
+PID is dead, the redelivered copy reclaims the event and processes it
+normally.
 """
 
 import argparse
@@ -136,6 +145,32 @@ def try_claim(store_path, event_id, worker_name):
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
+def wait_for_resolution(store_path, event_id, worker_name, timeout=30.0):
+    """Wait for a live claim to resolve, without ACKing the held copy.
+
+    Returns "duplicate-processed" (first worker finished: safe to ACK),
+    "reclaimed" (first worker died: this worker now holds the claim),
+    "duplicate-processing" (another waiting worker reclaimed it first:
+    keep waiting), "missing" (claim vanished: re-claim), or "timeout"
+    (still unresolved after ``timeout`` seconds: caller must NACK with
+    requeue=True, never ACK, so the copy is not lost).
+    The held copy stays unacknowledged throughout, so if this worker
+    itself crashes while waiting, RabbitMQ redelivers its copy too.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        entry = load_store(store_path).get(event_id)
+        if entry is None:
+            return "missing"
+        if entry.get("status") == "processed":
+            return "duplicate-processed"
+        if entry.get("status") == "processing" and not pid_alive(entry.get("pid")):
+            outcome, _entry = try_claim(store_path, event_id, worker_name)
+            return outcome
+        time.sleep(0.2)
+    return "timeout"
+
+
 def mark_processed(store_path, event_id, worker_name):
     """Mark event_id processed, under the same exclusive lock."""
     lock_path = store_path + ".lock"
@@ -161,6 +196,10 @@ def main():
                         help="Shared file of processed event_ids.")
     parser.add_argument("--fail-on", default=None,
                         help="event_id to crash on before ACK (redelivery demo).")
+    parser.add_argument("--fail-during", default=None,
+                        help="event_id to crash on DURING processing, after "
+                             "claiming but before marking processed or ACKing "
+                             "(loss-protection demo).")
     parser.add_argument("--delay", type=float, default=0.8,
                         help="Simulated processing time in seconds.")
     args = parser.parse_args()
@@ -200,12 +239,40 @@ def main():
             ch.basic_ack(delivery_tag=method.delivery_tag)
             return
         if outcome == "duplicate-processing":
+            # DO NOT ACK yet: this copy is the backup if the first
+            # worker crashes. Hold it unacknowledged and poll the claim.
             log(args.name, f"DUPLICATE detected for event_id={event_id} "
                            f"-- already being processed by {entry.get('worker')} "
                            f"(pid {entry.get('pid')} still alive) "
-                           f"-- skipping business action, ACKing to drop it")
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-            return
+                           f"-- NOT ACKing yet: holding this copy unacked "
+                           f"while the first worker resolves, so it is not "
+                           f"lost if the first worker crashes")
+            while True:
+                result = wait_for_resolution(args.store, event_id, args.name)
+                if result == "duplicate-processed":
+                    log(args.name, f"DUPLICATE resolved for event_id={event_id} "
+                                   f"-- first worker finished "
+                                   f"-- now ACKing to drop it")
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    return
+                if result == "reclaimed":
+                    log(args.name, f"RECLAIMED event_id={event_id} "
+                                   f"-- first worker died while processing, "
+                                   f"so this waiting copy will be processed")
+                    break
+                if result == "timeout":
+                    log(args.name, f"DUPLICATE unresolved for event_id={event_id} "
+                                   f"after 30s -- NACKing with requeue=True "
+                                   f"so this copy is NOT lost")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    return
+                if result == "missing":
+                    outcome2, _ = try_claim(args.store, event_id, args.name)
+                    if outcome2 in ("claimed", "reclaimed"):
+                        break
+                    continue
+                # Another waiting worker reclaimed it first: keep waiting.
+                continue
         if outcome == "reclaimed":
             log(args.name, f"RECLAIMED event_id={event_id} "
                            f"-- previous claim by {entry.get('worker')} "
@@ -224,6 +291,16 @@ def main():
         # The business action (here: simulated order processing).
         # No other worker can be running it: this worker holds the claim.
         log(args.name, f"processing order {message['order_id']} ...")
+        # Failure simulation, mid-processing: crash after claiming and
+        # starting work, but before marking processed or ACKing. Any
+        # worker holding a duplicate copy must take over (see above).
+        if args.fail_during and event_id == args.fail_during:
+            time.sleep(0.5)
+            log(args.name, f"SIMULATED CRASH DURING PROCESSING on event_id={event_id} "
+                           f"-- exiting WITHOUT ACK and WITHOUT marking processed")
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
         time.sleep(args.delay)
         mark_processed(args.store, event_id, args.name)
         log(args.name, f"processed order {message['order_id']} "

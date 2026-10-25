@@ -44,10 +44,16 @@ Key design choices:
 - **Atomic duplicate claim**: check and claim are one step under an
   exclusive file lock. A worker records `event_id -> {status: processing,
   worker, pid}` before processing; a second copy sees a live claim or a
-  `processed` record and drops out as a duplicate, so two simultaneous
-  copies cannot both run the business action. A claim whose PID is dead
-  (including a zombie, checked via `/proc/<pid>/status`) is reclaimable,
-  so crash redelivery is not mistaken for a duplicate.
+  `processed` record, so two simultaneous copies cannot both run the
+  business action. A claim whose PID is dead (including a zombie,
+  checked via `/proc/<pid>/status`) is reclaimable, so crash redelivery
+  is not mistaken for a duplicate.
+- **No premature ACK of an in-progress duplicate**: a copy arriving
+  while another worker is still processing is held unacknowledged and
+  polled. It is ACKed only after the first worker finishes, reclaimed
+  and processed if the first worker dies, or NACKed with requeue=True
+  after 30 seconds -- never discarded on the assumption that the first
+  worker will succeed.
 - **Broker redelivery flag**: every receipt logs `method.redelivered`,
   so a redelivery is shown directly by the broker (`redelivered=True`),
   not inferred from the log sequence.
@@ -96,8 +102,7 @@ pika 1.4.4. Full, unedited terminal output for each demo is in `evidence/`.
 
 All 5 messages were processed and ACKed, 5 unique `event_id`s recorded.
 
-<img width="1185" height="612" alt="01-successful-processing" src="https://github.com/user-attachments/assets/1ff8cb63-40fc-432d-a0a3-56cd9cca1066" />
-
+![Successful message processing](screenshots/01-successful-processing.png)
 
 ## Evidence: two competing consumers
 
@@ -121,8 +126,7 @@ pattern: RabbitMQ delivers each message to one consumer only, and
 `prefetch_count=1` keeps the split roughly even instead of letting the
 first worker drain the queue.
 
-<img width="1185" height="678" alt="02-competing-consumers" src="https://github.com/user-attachments/assets/942639fc-b56a-444d-bfa1-0547d1331f3c" />
-
+![Two competing consumers](screenshots/02-competing-consumers.png)
 
 ## Evidence: failure and redelivery
 
@@ -157,8 +161,7 @@ sequence. Worker-2 reclaims worker-1's dead claim, processes, and ACKs.
 Worker-2 kept running throughout, so the system as a whole never went
 down, and the order was not lost.
 
-<img width="1219" height="326" alt="03-failure-redelivery" src="https://github.com/user-attachments/assets/2b05f354-54cb-4cc0-83d5-5317a52083a8" />
-
+![Failure and redelivery](screenshots/03-failure-redelivery.png)
 
 ## Evidence: duplicate handling
 
@@ -166,10 +169,12 @@ Workers share `processed_events.json`, where each `event_id` maps to
 `{status: processing | processed, worker, pid}`. Check and claim are a
 single step under an exclusive file lock: a worker claims the event
 before processing, so a second copy -- simultaneous or later -- sees a
-live claim or a `processed` record and drops out as a duplicate. Only a
-claim whose PID is dead can be reclaimed, which is what lets crash
-redelivery through. Publish the same `event_id` twice at once, then
-again after it is processed:
+live claim or a `processed` record. Only a claim whose PID is dead can
+be reclaimed, which is what lets crash redelivery through. A copy that
+arrives while another worker is still processing is NOT ACKed straight
+away (see "Loss protection" below): it is held unacknowledged until
+that worker finishes, then ACKed as a duplicate. Publish the same
+`event_id` twice at once, then again after it is processed:
 
 ```bash
 python worker.py --name worker-1
@@ -181,34 +186,77 @@ python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget -
 Full log: `evidence/duplicate-handling.log`.
 
 ```
-[worker-2 12:14:55] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
-[worker-1 12:14:55] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
-[worker-1 12:14:55] DUPLICATE detected for event_id=evt-dup-001 -- already being processed by worker-2 (pid 13025 still alive) -- skipping business action, ACKing to drop it
-[worker-2 12:14:55] processing order ORD-9002 ...
-[worker-2 12:14:56] processed order ORD-9002 (event_id=evt-dup-001), sending ACK
-[worker-1 12:14:56] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
-[worker-1 12:14:56] DUPLICATE detected for event_id=evt-dup-001 -- already processed by worker-2 -- skipping business action, ACKing to drop it
+[worker-1 14:23:43] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-1 14:23:43] processing order ORD-9002 ...
+[worker-2 14:23:43] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-2 14:23:43] DUPLICATE detected for event_id=evt-dup-001 -- already being processed by worker-1 (pid 2931 still alive) -- NOT ACKing yet: holding this copy unacked while the first worker resolves, so it is not lost if the first worker crashes
+[worker-1 14:23:44] processed order ORD-9002 (event_id=evt-dup-001), sending ACK
+[worker-2 14:23:44] DUPLICATE resolved for event_id=evt-dup-001 -- first worker finished -- now ACKing to drop it
+[worker-1 14:23:44] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-1 14:23:44] DUPLICATE detected for event_id=evt-dup-001 -- already processed by worker-1 -- skipping business action, ACKing to drop it
 ```
 
 Both the simultaneous copy and the later sequential copy were caught,
 by a different worker than the one that processed the order, which is
 why the store is shared rather than per-worker. The business action ran
 exactly once: the store ends with exactly one processed entry,
-`evt-dup-001`. Each duplicate is ACKed, so RabbitMQ does not redeliver
-it forever.
+`evt-dup-001`. A copy is ACKed only once it is known to be a duplicate
+of finished work, so RabbitMQ does not redeliver it forever -- and, as
+the next section shows, not before that either.
 
-<img width="1496" height="392" alt="04-duplicate-handling" src="https://github.com/user-attachments/assets/4c168b2a-6b4c-4d51-a799-4d8cdb1983c3" />
+![Duplicate handling](screenshots/04-duplicate-handling.png)
 
+## Evidence: loss protection when the first worker crashes mid-processing
+
+This is the edge case in the old duplicate handling: a second copy
+arriving while the first worker was still processing was ACKed
+immediately. If the first worker then crashed before finishing, that
+backup copy was already gone, and the business action was protected
+only by hoping the original delivery would be redelivered. The fix
+holds the second copy unacknowledged and polls the claim instead.
+
+Reproduce it with `--fail-during`, which crashes a worker after
+claiming and starting work, before marking processed or ACKing:
+
+```bash
+python worker.py --name worker-1 --fail-during evt-loss-001
+python worker.py --name worker-2
+python producer.py --event-id evt-loss-001 --order-id ORD-9003 --item-id widget --quantity 1 --repeat 2
+```
+
+Full log: `evidence/loss-protection.log`.
+
+```
+[worker-1 14:23:49] received event_id=evt-loss-001 order_id=ORD-9003 item_id=widget quantity=1 redelivered=False
+[worker-2 14:23:49] received event_id=evt-loss-001 order_id=ORD-9003 item_id=widget quantity=1 redelivered=False
+[worker-2 14:23:49] DUPLICATE detected for event_id=evt-loss-001 -- already being processed by worker-1 (pid 2949 still alive) -- NOT ACKing yet: holding this copy unacked while the first worker resolves, so it is not lost if the first worker crashes
+[worker-1 14:23:49] processing order ORD-9003 ...
+[worker-1 14:23:49] SIMULATED CRASH DURING PROCESSING on event_id=evt-loss-001 -- exiting WITHOUT ACK and WITHOUT marking processed
+[worker-2 14:23:49] RECLAIMED event_id=evt-loss-001 -- first worker died while processing, so this waiting copy will be processed
+[worker-2 14:23:49] processing order ORD-9003 ...
+[worker-2 14:23:50] processed order ORD-9003 (event_id=evt-loss-001), sending ACK
+[worker-2 14:23:50] received event_id=evt-loss-001 order_id=ORD-9003 item_id=widget quantity=1 redelivered=True
+[worker-2 14:23:50] DUPLICATE detected for event_id=evt-loss-001 -- already processed by worker-2 -- skipping business action, ACKing to drop it
+```
+
+Worker-2 never ACKed its copy early: it waited, saw worker-1 die,
+reclaimed the event, and processed it exactly once. The original copy
+then arrived as a redelivery and was correctly dropped as a duplicate
+of finished work. If the first worker had instead stayed alive past
+the 30-second wait, the waiting worker would NACK with requeue=True --
+again preserving, never discarding, the copy.
+
+![Loss protection](screenshots/05-loss-protection.png)
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `producer.py` | Publishes order messages (`--count`, or a single `--event-id` / `--order-id`, with `--repeat` to republish). |
-| `worker.py` | Consumes, logs, processes, ACKs. `--name`, `--fail-on <event_id>` for the crash demo, `--delay` for simulated processing time, `--store` for the processed-event file. |
+| `worker.py` | Consumes, logs, processes, ACKs. `--name`, `--fail-on <event_id>` for the crash-before-processing demo, `--fail-during <event_id>` for the crash-during-processing demo, `--delay` for simulated processing time, `--store` for the processed-event file. |
 | `docker-compose.yml` | RabbitMQ with management UI. |
 | `requirements.txt` | `pika` only. |
-| `evidence/` | Full terminal logs for all four demos above. |
+| `evidence/` | Full terminal logs for all demos above, including `loss-protection.log`. |
 | `screenshots/` | PNG screenshots rendered from those same evidence logs, one per demo. |
 
 ## Reflection

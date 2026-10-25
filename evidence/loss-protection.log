@@ -1,0 +1,25 @@
+$ python worker.py --name worker-1 --fail-during evt-loss-001
+$ python worker.py --name worker-2
+$ python producer.py --event-id evt-loss-001 --order-id ORD-9003 --item-id widget --quantity 1 --repeat 2   # two copies at once
+[worker-2 14:23:47] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[worker-1 14:23:47] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[producer] published event_id=evt-loss-001 order_id=ORD-9003 item_id=widget quantity=1
+[producer] published event_id=evt-loss-001 order_id=ORD-9003 item_id=widget quantity=1
+[worker-1 14:23:49] received event_id=evt-loss-001 order_id=ORD-9003 item_id=widget quantity=1 redelivered=False
+[worker-2 14:23:49] received event_id=evt-loss-001 order_id=ORD-9003 item_id=widget quantity=1 redelivered=False
+[worker-2 14:23:49] DUPLICATE detected for event_id=evt-loss-001 -- already being processed by worker-1 (pid 2949 still alive) -- NOT ACKing yet: holding this copy unacked while the first worker resolves, so it is not lost if the first worker crashes
+[worker-1 14:23:49] processing order ORD-9003 ...
+[worker-1 14:23:49] SIMULATED CRASH DURING PROCESSING on event_id=evt-loss-001 -- exiting WITHOUT ACK and WITHOUT marking processed
+[worker-2 14:23:49] RECLAIMED event_id=evt-loss-001 -- first worker died while processing, so this waiting copy will be processed
+[worker-2 14:23:49] processing order ORD-9003 ...
+[worker-2 14:23:50] processed order ORD-9003 (event_id=evt-loss-001), sending ACK
+[worker-2 14:23:50] received event_id=evt-loss-001 order_id=ORD-9003 item_id=widget quantity=1 redelivered=True
+[worker-2 14:23:50] REDELIVERY: broker redelivered flag is True for event_id=evt-loss-001 -- this is a broker redelivery, not a new publish
+[worker-2 14:23:50] DUPLICATE detected for event_id=evt-loss-001 -- already processed by worker-2 -- skipping business action, ACKing to drop it
+
+--- verification (computed from the log above) ---
+worker-1 crashed DURING processing: True
+worker-2 held its copy unacked (NOT ACKing yet): True
+worker-2 reclaimed and processed ORD-9003 (must be exactly 1): 1
+no premature ACK of the waiting copy before reclaim (ACK only after processing): True
+processed event_ids in store (must be exactly ['evt-loss-001']): ['evt-loss-001']
