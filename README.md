@@ -41,6 +41,16 @@ Key design choices:
 - **Independent processes**: the producer exits after publishing; each
   worker is its own process and can be started, stopped, or crashed
   without stopping the others.
+- **Atomic duplicate claim**: check and claim are one step under an
+  exclusive file lock. A worker records `event_id -> {status: processing,
+  worker, pid}` before processing; a second copy sees a live claim or a
+  `processed` record and drops out as a duplicate, so two simultaneous
+  copies cannot both run the business action. A claim whose PID is dead
+  (including a zombie, checked via `/proc/<pid>/status`) is reclaimable,
+  so crash redelivery is not mistaken for a duplicate.
+- **Broker redelivery flag**: every receipt logs `method.redelivered`,
+  so a redelivery is shown directly by the broker (`redelivered=True`),
+  not inferred from the log sequence.
 
 ## Running
 
@@ -75,13 +85,13 @@ pika 1.4.4. Full, unedited terminal output for each demo is in `evidence/`.
 `evidence/successful-processing.log`.
 
 ```
-[producer] published event_id=3a668d85-... order_id=ORD-1001 item_id=widget quantity=1
-[producer] published event_id=aa4bbcb5-... order_id=ORD-1002 item_id=widget quantity=1
-[worker-2 11:10:10] received event_id=3a668d85-... order_id=ORD-1001 item_id=widget quantity=1
-[worker-2 11:10:10] processing order ORD-1001 ...
-[worker-1 11:10:10] received event_id=aa4bbcb5-... order_id=ORD-1002 item_id=widget quantity=1
-[worker-2 11:10:10] processed order ORD-1001 (event_id=3a668d85-...), sending ACK
-[worker-1 11:10:10] processed order ORD-1002 (event_id=aa4bbcb5-...), sending ACK
+[producer] published event_id=dbac9263-... order_id=ORD-1001 item_id=widget quantity=1
+[producer] published event_id=8d57df12-... order_id=ORD-1002 item_id=widget quantity=1
+[worker-1 12:14:38] received event_id=dbac9263-... order_id=ORD-1001 item_id=widget quantity=1 redelivered=False
+[worker-1 12:14:38] processing order ORD-1001 ...
+[worker-2 12:14:38] received event_id=8d57df12-... order_id=ORD-1002 item_id=widget quantity=1 redelivered=False
+[worker-1 12:14:39] processed order ORD-1001 (event_id=dbac9263-...), sending ACK
+[worker-2 12:14:39] processed order ORD-1002 (event_id=8d57df12-...), sending ACK
 ```
 
 All 5 messages were processed and ACKed, 5 unique `event_id`s recorded.
@@ -96,12 +106,12 @@ across both:
 
 | Order | Processed by |
 |-------|--------------|
-| ORD-1001 | worker-1 |
-| ORD-1002 | worker-2 |
+| ORD-1001 | worker-2 |
+| ORD-1002 | worker-1 |
 | ORD-1003 | worker-1 |
 | ORD-1004 | worker-2 |
-| ORD-1005 | worker-2 |
-| ORD-1006 | worker-1 |
+| ORD-1005 | worker-1 |
+| ORD-1006 | worker-2 |
 
 No order appears under both workers. That is the competing-consumer
 pattern: RabbitMQ delivers each message to one consumer only, and
@@ -122,54 +132,61 @@ python producer.py --event-id evt-crash-001 --order-id ORD-9001 --item-id widget
 Full log: `evidence/failure-redelivery.log`.
 
 ```
-[worker-1 11:10:22] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2
-[worker-1 11:10:22] SIMULATED CRASH on event_id=evt-crash-001 -- exiting WITHOUT ACK (message will be redelivered)
-[worker-2 11:10:22] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2
-[worker-2 11:10:22] processing order ORD-9001 ...
-[worker-2 11:10:23] processed order ORD-9001 (event_id=evt-crash-001), sending ACK
+[worker-1 12:14:50] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2 redelivered=False
+[worker-1 12:14:50] SIMULATED CRASH on event_id=evt-crash-001 -- exiting WITHOUT ACK (message will be redelivered)
+[worker-2 12:14:50] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2 redelivered=True
+[worker-2 12:14:50] REDELIVERY: broker redelivered flag is True for event_id=evt-crash-001 -- this is a broker redelivery, not a new publish
+[worker-2 12:14:50] RECLAIMED event_id=evt-crash-001 -- previous claim by worker-1 (pid 12977) is dead, so this redelivery will be processed
+[worker-2 12:14:50] processing order ORD-9001 ...
+[worker-2 12:14:51] processed order ORD-9001 (event_id=evt-crash-001), sending ACK
 ```
 
-What happened, in order: (1) worker-1 received the message, (2) it exited
-before ACKing and before marking the event processed, (3) RabbitMQ
-requeued the message and delivered it again to worker-2, which processed
-and ACKed it. Worker-2 kept running throughout, so the system as a whole
-never went down, and the order was not lost.
+What happened, in order: (1) worker-1 received the message
+(`redelivered=False`), (2) it exited before ACKing and before marking
+the event processed, (3) RabbitMQ requeued the message and delivered it
+again to worker-2, and the broker itself marks that second delivery
+`redelivered=True` -- that flag, printed on the receipt line and in the
+`REDELIVERY` line, is direct proof of redelivery, not just the log
+sequence. Worker-2 reclaims worker-1's dead claim, processes, and ACKs.
+Worker-2 kept running throughout, so the system as a whole never went
+down, and the order was not lost.
 
 ## Evidence: duplicate handling
 
-Workers record every processed `event_id` in the shared file
-`processed_events.json` (re-read for every message, updated under an
-exclusive file lock, and re-checked again after processing, before the
-record is committed). Publish the same `event_id` twice, sequentially:
+Workers share `processed_events.json`, where each `event_id` maps to
+`{status: processing | processed, worker, pid}`. Check and claim are a
+single step under an exclusive file lock: a worker claims the event
+before processing, so a second copy -- simultaneous or later -- sees a
+live claim or a `processed` record and drops out as a duplicate. Only a
+claim whose PID is dead can be reclaimed, which is what lets crash
+redelivery through. Publish the same `event_id` twice at once, then
+again after it is processed:
 
 ```bash
 python worker.py --name worker-1
 python worker.py --name worker-2
-python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1
+python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1 --repeat 2
 python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1
 ```
 
 Full log: `evidence/duplicate-handling.log`.
 
 ```
-[worker-1 11:10:27] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
-[worker-1 11:10:27] processing order ORD-9002 ...
-[worker-1 11:10:27] processed order ORD-9002 (event_id=evt-dup-001), sending ACK
-[worker-2 11:10:28] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
-[worker-2 11:10:28] DUPLICATE detected for event_id=evt-dup-001 -- skipping business action, ACKing to drop it
+[worker-2 12:14:55] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-1 12:14:55] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-1 12:14:55] DUPLICATE detected for event_id=evt-dup-001 -- already being processed by worker-2 (pid 13025 still alive) -- skipping business action, ACKing to drop it
+[worker-2 12:14:55] processing order ORD-9002 ...
+[worker-2 12:14:56] processed order ORD-9002 (event_id=evt-dup-001), sending ACK
+[worker-1 12:14:56] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-1 12:14:56] DUPLICATE detected for event_id=evt-dup-001 -- already processed by worker-2 -- skipping business action, ACKing to drop it
 ```
 
-The second copy was detected by a different worker than the one that
-processed the first copy, which is why the store is shared rather than
-per-worker. The business action ran exactly once: the store ends with
-exactly `["evt-dup-001"]`. The duplicate is ACKed, so RabbitMQ does not
-redeliver it forever.
-
-Note: the duplicate demo publishes the second copy after the first has
-been processed. Two copies published at the same instant would race both
-workers' first check; real duplicates in production arrive as retries or
-redeliveries after the first copy completed, which is the case this
-handles.
+Both the simultaneous copy and the later sequential copy were caught,
+by a different worker than the one that processed the order, which is
+why the store is shared rather than per-worker. The business action ran
+exactly once: the store ends with exactly one processed entry,
+`evt-dup-001`. Each duplicate is ACKed, so RabbitMQ does not redeliver
+it forever.
 
 ## Files
 

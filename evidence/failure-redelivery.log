@@ -1,16 +1,21 @@
 $ python worker.py --name worker-1 --fail-on evt-crash-001
 $ python worker.py --name worker-2
 $ python producer.py --event-id evt-crash-001 --order-id ORD-9001 --item-id widget --quantity 2
-[worker-1 11:10:20] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
-[worker-2 11:10:20] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[worker-1 12:14:48] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[worker-2 12:14:48] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
 [producer] published event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2
-[worker-1 11:10:22] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2
-[worker-1 11:10:22] SIMULATED CRASH on event_id=evt-crash-001 -- exiting WITHOUT ACK (message will be redelivered)
-[worker-2 11:10:22] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2
-[worker-2 11:10:22] processing order ORD-9001 ...
-[worker-2 11:10:23] processed order ORD-9001 (event_id=evt-crash-001), sending ACK
+[worker-1 12:14:50] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2 redelivered=False
+[worker-1 12:14:50] SIMULATED CRASH on event_id=evt-crash-001 -- exiting WITHOUT ACK (message will be redelivered)
+[worker-2 12:14:50] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2 redelivered=True
+[worker-2 12:14:50] REDELIVERY: broker redelivered flag is True for event_id=evt-crash-001 -- this is a broker redelivery, not a new publish
+[worker-2 12:14:50] RECLAIMED event_id=evt-crash-001 -- previous claim by worker-1 (pid 12977) is dead, so this redelivery will be processed
+[worker-2 12:14:50] processing order ORD-9001 ...
+[worker-2 12:14:51] processed order ORD-9001 (event_id=evt-crash-001), sending ACK
 
 --- verification (computed from the log above) ---
 worker-1 received evt-crash-001: True
 worker-2 later processed the same event_id: True
-system still running after crash (worker-2 log lines after crash): 5
+worker-2 received it with broker redelivered=True: True
+REDELIVERY log line present: True
+RECLAIMED log line present (dead claim reclaimed): True
+system still running after crash (worker-2 log lines after crash): 7

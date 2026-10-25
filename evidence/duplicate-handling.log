@@ -1,20 +1,21 @@
 $ python worker.py --name worker-1
 $ python worker.py --name worker-2
-$ python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1   (twice, sequentially)
-[worker-1 11:10:25] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
-[worker-2 11:10:25] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+$ python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1 --repeat 2   # simultaneous duplicate
+$ python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1   # sequential duplicate
+[worker-1 12:14:53] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[worker-2 12:14:53] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
 [producer] published event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
-[worker-1 11:10:27] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
-[worker-1 11:10:27] processing order ORD-9002 ...
-[worker-1 11:10:27] processed order ORD-9002 (event_id=evt-dup-001), sending ACK
-$ python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1   # same event_id again
 [producer] published event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
-[worker-2 11:10:28] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
-[worker-2 11:10:28] DUPLICATE detected for event_id=evt-dup-001 -- skipping business action, ACKing to drop it
+[worker-1 12:14:55] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-2 12:14:55] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-1 12:14:55] DUPLICATE detected for event_id=evt-dup-001 -- already being processed by worker-2 (pid 13025 still alive) -- skipping business action, ACKing to drop it
+[worker-2 12:14:55] processing order ORD-9002 ...
+[worker-2 12:14:56] processed order ORD-9002 (event_id=evt-dup-001), sending ACK
+[producer] published event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
+[worker-1 12:14:56] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1 redelivered=False
+[worker-1 12:14:56] DUPLICATE detected for event_id=evt-dup-001 -- already processed by worker-2 -- skipping business action, ACKing to drop it
 
 --- verification (computed from the log above) ---
-DUPLICATE log lines: 1
+DUPLICATE log lines (must be >= 2: simultaneous + sequential): 2
 processed lines for ORD-9002 (must be exactly 1): 1
-event_ids in store (must be exactly ['evt-dup-001']): [
-  "evt-dup-001"
-]
+processed event_ids in store (must be exactly ['evt-dup-001']): ['evt-dup-001']
