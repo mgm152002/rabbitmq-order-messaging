@@ -1,0 +1,197 @@
+# Asynchronous Order Messaging with RabbitMQ
+
+A small asynchronous messaging system in Python: an Order Producer publishes
+order messages to a RabbitMQ queue, and independent Order Worker processes
+consume and process them. The producer and workers run as separate processes
+and communicate only through the queue.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    P[Order Producer<br/>producer.py] -->|publish JSON order| Q[(RabbitMQ queue<br/>'orders', durable)]
+    Q -->|deliver, one at a time| W1[Order Worker 1<br/>worker.py --name worker-1]
+    Q -->|deliver, one at a time| W2[Order Worker 2<br/>worker.py --name worker-2]
+    W1 -->|ACK after processing| Q
+    W2 -->|ACK after processing| Q
+    W1 & W2 --> S[(processed_events.json<br/>shared processed event_ids)]
+```
+
+```
+Producer ──publish──> RabbitMQ queue 'orders' ──deliver──> Worker 1
+                                                   └──> Worker 2
+Workers ──ACK after processing──> queue
+Workers ──record event_id──> processed_events.json (shared, file-locked)
+```
+
+Message format (every message carries exactly these fields):
+
+```json
+{"event_id": "45c603d0-ff89-4dbf-9b5a-233aee32c6ac", "order_id": "ORD-1001", "item_id": "widget", "quantity": 1}
+```
+
+Key design choices:
+
+- **Durable queue, persistent messages** (`delivery_mode=2`): queued orders
+  survive a broker restart.
+- **Manual ACK, `prefetch_count=1`**: a worker ACKs only after processing
+  finishes, and RabbitMQ hands each worker at most one unacknowledged
+  message at a time. That is what makes the workers fair competing
+  consumers instead of one worker grabbing the whole queue.
+- **Independent processes**: the producer exits after publishing; each
+  worker is its own process and can be started, stopped, or crashed
+  without stopping the others.
+
+## Running
+
+Requirements: Python 3.10+, Docker (for RabbitMQ), or a local RabbitMQ
+on `localhost:5672`.
+
+```bash
+# 1. Start RabbitMQ (management UI at http://localhost:15672, guest/guest)
+docker compose up -d
+
+# 2. Install the only dependency
+pip install -r requirements.txt
+
+# 3. Start two workers, in two separate terminals
+python worker.py --name worker-1
+python worker.py --name worker-2
+
+# 4. Publish orders, in a third terminal
+python producer.py --count 5
+```
+
+Stop everything with Ctrl-C in the worker terminals, then
+`docker compose down`. To start from a clean slate between demos, delete
+`processed_events.json` and purge the queue (or restart the broker).
+
+Evidence below was run against RabbitMQ 3.12.1 on localhost, Python 3.12,
+pika 1.4.4. Full, unedited terminal output for each demo is in `evidence/`.
+
+## Example: successful message processing
+
+`python producer.py --count 5` with both workers running. Full log:
+`evidence/successful-processing.log`.
+
+```
+[producer] published event_id=3a668d85-... order_id=ORD-1001 item_id=widget quantity=1
+[producer] published event_id=aa4bbcb5-... order_id=ORD-1002 item_id=widget quantity=1
+[worker-2 11:10:10] received event_id=3a668d85-... order_id=ORD-1001 item_id=widget quantity=1
+[worker-2 11:10:10] processing order ORD-1001 ...
+[worker-1 11:10:10] received event_id=aa4bbcb5-... order_id=ORD-1002 item_id=widget quantity=1
+[worker-2 11:10:10] processed order ORD-1001 (event_id=3a668d85-...), sending ACK
+[worker-1 11:10:10] processed order ORD-1002 (event_id=aa4bbcb5-...), sending ACK
+```
+
+All 5 messages were processed and ACKed, 5 unique `event_id`s recorded.
+
+## Evidence: two competing consumers
+
+`python producer.py --count 6` with worker-1 and worker-2 on the same
+queue. Full log: `evidence/competing-consumers.log`.
+
+Each order was processed by exactly one worker, and the work was split
+across both:
+
+| Order | Processed by |
+|-------|--------------|
+| ORD-1001 | worker-1 |
+| ORD-1002 | worker-2 |
+| ORD-1003 | worker-1 |
+| ORD-1004 | worker-2 |
+| ORD-1005 | worker-2 |
+| ORD-1006 | worker-1 |
+
+No order appears under both workers. That is the competing-consumer
+pattern: RabbitMQ delivers each message to one consumer only, and
+`prefetch_count=1` keeps the split roughly even instead of letting the
+first worker drain the queue.
+
+## Evidence: failure and redelivery
+
+Start worker-1 in crash mode and worker-2 normally, then publish one
+message with a fixed `event_id`:
+
+```bash
+python worker.py --name worker-1 --fail-on evt-crash-001
+python worker.py --name worker-2
+python producer.py --event-id evt-crash-001 --order-id ORD-9001 --item-id widget --quantity 2
+```
+
+Full log: `evidence/failure-redelivery.log`.
+
+```
+[worker-1 11:10:22] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2
+[worker-1 11:10:22] SIMULATED CRASH on event_id=evt-crash-001 -- exiting WITHOUT ACK (message will be redelivered)
+[worker-2 11:10:22] received event_id=evt-crash-001 order_id=ORD-9001 item_id=widget quantity=2
+[worker-2 11:10:22] processing order ORD-9001 ...
+[worker-2 11:10:23] processed order ORD-9001 (event_id=evt-crash-001), sending ACK
+```
+
+What happened, in order: (1) worker-1 received the message, (2) it exited
+before ACKing and before marking the event processed, (3) RabbitMQ
+requeued the message and delivered it again to worker-2, which processed
+and ACKed it. Worker-2 kept running throughout, so the system as a whole
+never went down, and the order was not lost.
+
+## Evidence: duplicate handling
+
+Workers record every processed `event_id` in the shared file
+`processed_events.json` (re-read for every message, updated under an
+exclusive file lock, and re-checked again after processing, before the
+record is committed). Publish the same `event_id` twice, sequentially:
+
+```bash
+python worker.py --name worker-1
+python worker.py --name worker-2
+python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1
+python producer.py --event-id evt-dup-001 --order-id ORD-9002 --item-id widget --quantity 1
+```
+
+Full log: `evidence/duplicate-handling.log`.
+
+```
+[worker-1 11:10:27] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
+[worker-1 11:10:27] processing order ORD-9002 ...
+[worker-1 11:10:27] processed order ORD-9002 (event_id=evt-dup-001), sending ACK
+[worker-2 11:10:28] received event_id=evt-dup-001 order_id=ORD-9002 item_id=widget quantity=1
+[worker-2 11:10:28] DUPLICATE detected for event_id=evt-dup-001 -- skipping business action, ACKing to drop it
+```
+
+The second copy was detected by a different worker than the one that
+processed the first copy, which is why the store is shared rather than
+per-worker. The business action ran exactly once: the store ends with
+exactly `["evt-dup-001"]`. The duplicate is ACKed, so RabbitMQ does not
+redeliver it forever.
+
+Note: the duplicate demo publishes the second copy after the first has
+been processed. Two copies published at the same instant would race both
+workers' first check; real duplicates in production arrive as retries or
+redeliveries after the first copy completed, which is the case this
+handles.
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `producer.py` | Publishes order messages (`--count`, or a single `--event-id` / `--order-id`, with `--repeat` to republish). |
+| `worker.py` | Consumes, logs, processes, ACKs. `--name`, `--fail-on <event_id>` for the crash demo, `--delay` for simulated processing time, `--store` for the processed-event file. |
+| `docker-compose.yml` | RabbitMQ with management UI. |
+| `requirements.txt` | `pika` only. |
+| `evidence/` | Full terminal logs for all four demos above. |
+
+## Reflection
+
+RabbitMQ gives at-least-once delivery, not exactly-once: if a worker
+crashes, loses its connection, or its ACK is lost after processing, the
+broker cannot tell whether the work happened, so it redelivers the
+message to keep it from being lost. A message can therefore arrive more
+than once even when nothing is "wrong" with the producer. Idempotent
+handling fixes the consequence rather than the delivery: by keying the
+business action on a stable `event_id` and skipping any event already
+recorded as processed, a redelivered message becomes a harmless no-op
+instead of a double-charged, double-shipped order. That combination --
+at-least-once delivery plus idempotent consumers -- is what makes the
+system both reliable (nothing lost on crash) and correct (nothing done
+twice).

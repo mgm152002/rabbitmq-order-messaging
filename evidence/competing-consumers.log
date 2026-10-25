@@ -1,0 +1,32 @@
+$ python worker.py --name worker-1
+$ python worker.py --name worker-2
+$ python producer.py --count 6
+[worker-1 11:10:14] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[worker-2 11:10:14] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[producer] published event_id=45c603d0-ff89-4dbf-9b5a-233aee32c6ac order_id=ORD-1001 item_id=widget quantity=1
+[producer] published event_id=26c73f25-5471-4799-ac78-0c61a0ac235d order_id=ORD-1002 item_id=widget quantity=1
+[producer] published event_id=b0320f4c-fe5a-4f8c-a2cf-95e1dc8d7dbf order_id=ORD-1003 item_id=widget quantity=1
+[producer] published event_id=4b3d8f16-a6e1-48a6-83a9-767b88ed4df3 order_id=ORD-1004 item_id=widget quantity=1
+[producer] published event_id=5760768c-e8f1-4475-bff1-a7dd0ddee566 order_id=ORD-1005 item_id=widget quantity=1
+[producer] published event_id=742020e1-7de7-40b4-b78e-13719dbec64c order_id=ORD-1006 item_id=widget quantity=1
+[worker-1 11:10:16] received event_id=45c603d0-ff89-4dbf-9b5a-233aee32c6ac order_id=ORD-1001 item_id=widget quantity=1
+[worker-1 11:10:16] processing order ORD-1001 ...
+[worker-2 11:10:16] received event_id=26c73f25-5471-4799-ac78-0c61a0ac235d order_id=ORD-1002 item_id=widget quantity=1
+[worker-2 11:10:16] processing order ORD-1002 ...
+[worker-1 11:10:17] processed order ORD-1001 (event_id=45c603d0-ff89-4dbf-9b5a-233aee32c6ac), sending ACK
+[worker-2 11:10:17] processed order ORD-1002 (event_id=26c73f25-5471-4799-ac78-0c61a0ac235d), sending ACK
+[worker-1 11:10:17] received event_id=b0320f4c-fe5a-4f8c-a2cf-95e1dc8d7dbf order_id=ORD-1003 item_id=widget quantity=1
+[worker-1 11:10:17] processing order ORD-1003 ...
+[worker-2 11:10:17] received event_id=4b3d8f16-a6e1-48a6-83a9-767b88ed4df3 order_id=ORD-1004 item_id=widget quantity=1
+[worker-2 11:10:17] processing order ORD-1004 ...
+[worker-2 11:10:17] processed order ORD-1004 (event_id=4b3d8f16-a6e1-48a6-83a9-767b88ed4df3), sending ACK
+[worker-2 11:10:17] received event_id=5760768c-e8f1-4475-bff1-a7dd0ddee566 order_id=ORD-1005 item_id=widget quantity=1
+[worker-2 11:10:17] processing order ORD-1005 ...
+[worker-1 11:10:17] processed order ORD-1003 (event_id=b0320f4c-fe5a-4f8c-a2cf-95e1dc8d7dbf), sending ACK
+[worker-1 11:10:17] received event_id=742020e1-7de7-40b4-b78e-13719dbec64c order_id=ORD-1006 item_id=widget quantity=1
+[worker-1 11:10:17] processing order ORD-1006 ...
+[worker-2 11:10:18] processed order ORD-1005 (event_id=5760768c-e8f1-4475-bff1-a7dd0ddee566), sending ACK
+[worker-1 11:10:18] processed order ORD-1006 (event_id=742020e1-7de7-40b4-b78e-13719dbec64c), sending ACK
+
+--- verification (computed from the log above) ---
+worker that processed each order (exactly one per order = competing consumers): {'ORD-1001': ['worker-1'], 'ORD-1002': ['worker-2'], 'ORD-1003': ['worker-1'], 'ORD-1004': ['worker-2'], 'ORD-1005': ['worker-2'], 'ORD-1006': ['worker-1']}

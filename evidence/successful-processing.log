@@ -1,0 +1,29 @@
+$ docker compose up -d   # RabbitMQ running on localhost:5672
+$ python worker.py --name worker-1   (in one terminal)
+$ python worker.py --name worker-2   (in another terminal)
+$ python producer.py --count 5
+[worker-2 11:10:08] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[worker-1 11:10:08] waiting for messages on queue 'orders' (prefetch=1, manual ACK)
+[producer] published event_id=3a668d85-74c2-48c6-83aa-e54d4ef73dc7 order_id=ORD-1001 item_id=widget quantity=1
+[producer] published event_id=aa4bbcb5-aeb4-46df-9235-358328333949 order_id=ORD-1002 item_id=widget quantity=1
+[producer] published event_id=30a030db-8909-4e3a-910e-24863f4b8d4f order_id=ORD-1003 item_id=widget quantity=1
+[producer] published event_id=d4435834-d5d5-432d-9601-0ad841d9df3f order_id=ORD-1004 item_id=widget quantity=1
+[producer] published event_id=3b061141-9c22-469d-bab6-e38a62020fc2 order_id=ORD-1005 item_id=widget quantity=1
+[worker-2 11:10:10] received event_id=3a668d85-74c2-48c6-83aa-e54d4ef73dc7 order_id=ORD-1001 item_id=widget quantity=1
+[worker-2 11:10:10] processing order ORD-1001 ...
+[worker-1 11:10:10] received event_id=aa4bbcb5-aeb4-46df-9235-358328333949 order_id=ORD-1002 item_id=widget quantity=1
+[worker-1 11:10:10] processing order ORD-1002 ...
+[worker-2 11:10:10] processed order ORD-1001 (event_id=3a668d85-74c2-48c6-83aa-e54d4ef73dc7), sending ACK
+[worker-1 11:10:10] processed order ORD-1002 (event_id=aa4bbcb5-aeb4-46df-9235-358328333949), sending ACK
+[worker-1 11:10:10] received event_id=30a030db-8909-4e3a-910e-24863f4b8d4f order_id=ORD-1003 item_id=widget quantity=1
+[worker-2 11:10:10] received event_id=d4435834-d5d5-432d-9601-0ad841d9df3f order_id=ORD-1004 item_id=widget quantity=1
+[worker-1 11:10:10] processing order ORD-1003 ...
+[worker-2 11:10:10] processing order ORD-1004 ...
+[worker-2 11:10:11] processed order ORD-1004 (event_id=d4435834-d5d5-432d-9601-0ad841d9df3f), sending ACK
+[worker-1 11:10:11] processed order ORD-1003 (event_id=30a030db-8909-4e3a-910e-24863f4b8d4f), sending ACK
+[worker-2 11:10:11] received event_id=3b061141-9c22-469d-bab6-e38a62020fc2 order_id=ORD-1005 item_id=widget quantity=1
+[worker-2 11:10:11] processing order ORD-1005 ...
+[worker-2 11:10:12] processed order ORD-1005 (event_id=3b061141-9c22-469d-bab6-e38a62020fc2), sending ACK
+
+--- verification (computed from the log above) ---
+messages processed (unique event_ids in store at end): 5
