@@ -96,7 +96,8 @@ pika 1.4.4. Full, unedited terminal output for each demo is in `evidence/`.
 
 All 5 messages were processed and ACKed, 5 unique `event_id`s recorded.
 
-![Successful message processing](screenshots/01-successful-processing.png)
+<img width="1185" height="612" alt="01-successful-processing" src="https://github.com/user-attachments/assets/1ff8cb63-40fc-432d-a0a3-56cd9cca1066" />
+
 
 ## Evidence: two competing consumers
 
@@ -120,7 +121,8 @@ pattern: RabbitMQ delivers each message to one consumer only, and
 `prefetch_count=1` keeps the split roughly even instead of letting the
 first worker drain the queue.
 
-![Two competing consumers](screenshots/02-competing-consumers.png)
+<img width="1185" height="678" alt="02-competing-consumers" src="https://github.com/user-attachments/assets/942639fc-b56a-444d-bfa1-0547d1331f3c" />
+
 
 ## Evidence: failure and redelivery
 
@@ -155,7 +157,8 @@ sequence. Worker-2 reclaims worker-1's dead claim, processes, and ACKs.
 Worker-2 kept running throughout, so the system as a whole never went
 down, and the order was not lost.
 
-![Failure and redelivery](screenshots/03-failure-redelivery.png)
+<img width="1219" height="326" alt="03-failure-redelivery" src="https://github.com/user-attachments/assets/2b05f354-54cb-4cc0-83d5-5317a52083a8" />
+
 
 ## Evidence: duplicate handling
 
@@ -194,7 +197,8 @@ exactly once: the store ends with exactly one processed entry,
 `evt-dup-001`. Each duplicate is ACKed, so RabbitMQ does not redeliver
 it forever.
 
-![Duplicate handling](screenshots/04-duplicate-handling.png)
+<img width="1496" height="392" alt="04-duplicate-handling" src="https://github.com/user-attachments/assets/4c168b2a-6b4c-4d51-a799-4d8cdb1983c3" />
+
 
 ## Files
 
