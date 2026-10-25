@@ -124,6 +124,13 @@ def main():
         # The business action (here: simulated order processing).
         log(args.name, f"processing order {message['order_id']} ...")
         time.sleep(args.delay)
+        # Re-check before committing: another worker may have finished
+        # the same event_id while this one was processing.
+        if event_id in load_processed(args.store):
+            log(args.name, f"DUPLICATE detected for event_id={event_id} "
+                           f"on re-check -- discarding result, ACKing to drop it")
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            return
         mark_processed(args.store, event_id)
         log(args.name, f"processed order {message['order_id']} "
                        f"(event_id={event_id}), sending ACK")
