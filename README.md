@@ -96,6 +96,8 @@ pika 1.4.4. Full, unedited terminal output for each demo is in `evidence/`.
 
 All 5 messages were processed and ACKed, 5 unique `event_id`s recorded.
 
+![Successful message processing](screenshots/01-successful-processing.png)
+
 ## Evidence: two competing consumers
 
 `python producer.py --count 6` with worker-1 and worker-2 on the same
@@ -117,6 +119,8 @@ No order appears under both workers. That is the competing-consumer
 pattern: RabbitMQ delivers each message to one consumer only, and
 `prefetch_count=1` keeps the split roughly even instead of letting the
 first worker drain the queue.
+
+![Two competing consumers](screenshots/02-competing-consumers.png)
 
 ## Evidence: failure and redelivery
 
@@ -150,6 +154,8 @@ again to worker-2, and the broker itself marks that second delivery
 sequence. Worker-2 reclaims worker-1's dead claim, processes, and ACKs.
 Worker-2 kept running throughout, so the system as a whole never went
 down, and the order was not lost.
+
+![Failure and redelivery](screenshots/03-failure-redelivery.png)
 
 ## Evidence: duplicate handling
 
@@ -188,6 +194,8 @@ exactly once: the store ends with exactly one processed entry,
 `evt-dup-001`. Each duplicate is ACKed, so RabbitMQ does not redeliver
 it forever.
 
+![Duplicate handling](screenshots/04-duplicate-handling.png)
+
 ## Files
 
 | File | Purpose |
@@ -197,6 +205,7 @@ it forever.
 | `docker-compose.yml` | RabbitMQ with management UI. |
 | `requirements.txt` | `pika` only. |
 | `evidence/` | Full terminal logs for all four demos above. |
+| `screenshots/` | PNG screenshots rendered from those same evidence logs, one per demo. |
 
 ## Reflection
 
